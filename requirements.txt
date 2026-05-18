@@ -1,0 +1,7 @@
+fredapi>=0.5.2
+pandas>=2.0
+numpy>=1.26
+plotly>=5.18
+streamlit>=1.30
+python-dotenv>=1.0
+joblib>=1.3
