@@ -18,8 +18,30 @@ from typing import Optional
 # ---- Project-wide defaults ----------------------------------------------------
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CACHE_DIR = PROJECT_ROOT / ".cache"
-CACHE_DIR.mkdir(exist_ok=True)
+
+
+def _resolve_cache_dir() -> Path:
+    """Pick a writable cache directory.
+
+    Streamlit Cloud's project tree is read-only in some deployments, so we try
+    the in-repo .cache/ first and fall back to /tmp. Either way, the cache is
+    ephemeral on Streamlit Cloud (cleared on app restart) — that's fine.
+    """
+    primary = PROJECT_ROOT / ".cache"
+    try:
+        primary.mkdir(exist_ok=True)
+        # Verify we can actually write
+        test_file = primary / ".write_test"
+        test_file.touch()
+        test_file.unlink()
+        return primary
+    except (OSError, PermissionError):
+        fallback = Path("/tmp/fred_macro_cache")
+        fallback.mkdir(exist_ok=True)
+        return fallback
+
+
+CACHE_DIR = _resolve_cache_dir()
 
 DEFAULT_START_DATE = "2022-01-01"
 DEFAULT_DIFFUSION_START_DATE = "2015-01-01"   # diffusion charts need more history

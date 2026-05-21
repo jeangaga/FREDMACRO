@@ -117,3 +117,59 @@ def line_and_ma_traces(
         go.Scatter(x=df.index, y=df[level_col], name=base_name, mode="lines"),
         go.Scatter(x=df.index, y=df[ma_col], name=f"{base_name} MA", mode="lines"),
     ]
+
+
+def add_last_value_annotation(
+    fig: go.Figure,
+    series: pd.Series,
+    row: Optional[int] = None,
+    col: Optional[int] = None,
+    fmt: str = "{:.1f}%",
+    scale: float = 100.0,
+    ax: int = 25,
+    ay: int = -25,
+) -> go.Figure:
+    """Drop an arrow-labeled annotation on the most recent non-NaN value of `series`.
+
+    Default formatting assumes `series` is in decimal form (e.g. 0.025) and
+    should be displayed as a percent. Override `scale=1` to display as-is.
+
+    Safe to call on empty / all-NaN series — it's a no-op in that case.
+    """
+    clean = series.dropna()
+    if clean.empty:
+        return fig
+    x = clean.index[-1]
+    y = float(clean.iloc[-1])
+    fig.add_annotation(
+        x=x, y=y,
+        text=fmt.format(y * scale),
+        showarrow=True,
+        arrowhead=2,
+        ax=ax, ay=ay,
+        row=row, col=col,
+    )
+    return fig
+
+
+def add_paper_annotation(
+    fig: go.Figure,
+    text: str,
+    ypaper: float,
+    xpaper: float = 0.5,
+    font_size: int = 11,
+) -> go.Figure:
+    """Add a centered text annotation in paper coordinates (0..1 across the whole figure).
+
+    Useful for placing "pseudo-legends" between subplot panels without invoking
+    Plotly's legend (which shrinks the plot area).
+    """
+    fig.add_annotation(
+        x=xpaper, y=ypaper,
+        xref="paper", yref="paper",
+        text=text,
+        showarrow=False,
+        align="center",
+        font=dict(size=font_size),
+    )
+    return fig

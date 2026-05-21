@@ -20,6 +20,44 @@ def rolling_mean(series: pd.Series, window: int) -> pd.Series:
     return series.rolling(window=window).mean()
 
 
+def yoy_change(series: pd.Series, drop_initial: bool = True) -> pd.Series:
+    """12-month percentage change.
+
+    Returns the rolling 12-month % change as a decimal (0.025 = 2.5%).
+    With drop_initial=True, the first 12 NaN values are stripped so plots
+    don't start with a flat empty stretch.
+
+    NOTE: compute YoY on the FULL history series, then filter your display
+    window afterwards. Filtering before pct_change throws away 12 months of
+    real data at the start of the window.
+    """
+    yoy = series.pct_change(periods=12)
+    if drop_initial:
+        yoy = yoy.iloc[12:]
+    return yoy
+
+
+def annualized_change(
+    series: pd.Series,
+    periods: int = 3,
+    drop_initial: bool = True,
+) -> pd.Series:
+    """N-period % change, annualized.
+
+    For monthly data:
+      - periods=3 → 3-month change × 4   (the classic "3m annualized")
+      - periods=6 → 6-month change × 2
+
+    Like yoy_change(), compute on full history and filter display after.
+    """
+    if periods <= 0:
+        raise ValueError("periods must be positive")
+    chg = series.pct_change(periods=periods) * (12.0 / periods)
+    if drop_initial:
+        chg = chg.iloc[periods:]
+    return chg
+
+
 def with_change_and_ma(
     series: pd.Series,
     name: str,
