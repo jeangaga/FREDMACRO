@@ -176,10 +176,15 @@ def weighted_contributions(
     weights: pd.DataFrame,
     components: Iterable[str],
     periods: int = 6,
+    base: Optional[str] = None,
 ) -> pd.DataFrame:
-    """Contribution of each component to an N-period headline rate.
+    """Contribution of each component to an N-period aggregate rate.
 
-    contribution_c(t) = rate_c(t) * weight_c(start month of the window) / 100
+    contribution_c(t) = rate_c(t) * weight_c(start month of the window) / base_weight
+
+    where base_weight is 100 (weights are percent of the all-items basket) or,
+    when `base` names a column of `weights`, that column's weight at the same
+    start month — e.g. base="Core" rescales sub-components so Core = 100.
 
     BLS relative-importance convention: the weight published with CPI month t
     describes the basket at month t-1. The window ending at t starts at t-N,
@@ -191,7 +196,10 @@ def weighted_contributions(
         weights: BLS relative importance in percent, one column per component.
         components: which columns to combine.
         periods: window length N used to compute `rates`.
+        base: optional column of `weights` to normalise by instead of 100.
     """
     components = list(components)
-    w = weights[components].reindex(rates.index).shift(periods - 1) / 100.0
-    return rates[components] * w
+    cols = components + ([base] if base and base not in components else [])
+    w = weights[cols].reindex(rates.index).shift(periods - 1)
+    denom = w[base] if base else 100.0
+    return rates[components] * w[components].div(denom, axis=0)
