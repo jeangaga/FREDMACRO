@@ -151,3 +151,47 @@ def assemble_levels(
     if not series_map:
         raise ValueError("series_map is empty.")
     return pd.DataFrame(series_map).dropna(how="all")
+
+
+def compound_annualized_change(
+    df: pd.DataFrame | pd.Series,
+    periods: int = 6,
+) -> pd.DataFrame | pd.Series:
+    """N-period change of an index, compounded to an annual rate, in PERCENT.
+
+    ((I_t / I_{t-N}) ** (12 / N) - 1) * 100
+
+    For periods=6 this is the classic "6m annualized" rate (squared ratio).
+    Unlike annualized_change() (linear, decimal), this is compounded and
+    returned in percentage points, because it feeds a contribution chart
+    whose weights are also in percent.
+    """
+    if periods <= 0:
+        raise ValueError("periods must be positive")
+    return ((df / df.shift(periods)) ** (12.0 / periods) - 1.0) * 100.0
+
+
+def weighted_contributions(
+    rates: pd.DataFrame,
+    weights: pd.DataFrame,
+    components: Iterable[str],
+    periods: int = 6,
+) -> pd.DataFrame:
+    """Contribution of each component to an N-period headline rate.
+
+    contribution_c(t) = rate_c(t) * weight_c(start month of the window) / 100
+
+    BLS relative-importance convention: the weight published with CPI month t
+    describes the basket at month t-1. The window ending at t starts at t-N,
+    whose weight is therefore the row published at t-(N-1). Hence shift(N-1).
+
+    Args:
+        rates: percent rates (e.g. from compound_annualized_change), one column
+               per component, monthly index.
+        weights: BLS relative importance in percent, one column per component.
+        components: which columns to combine.
+        periods: window length N used to compute `rates`.
+    """
+    components = list(components)
+    w = weights[components].reindex(rates.index).shift(periods - 1) / 100.0
+    return rates[components] * w
