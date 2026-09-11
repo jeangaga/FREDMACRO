@@ -20,20 +20,21 @@ def rolling_mean(series: pd.Series, window: int) -> pd.Series:
     return series.rolling(window=window).mean()
 
 
-def yoy_change(series: pd.Series, drop_initial: bool = True) -> pd.Series:
-    """12-month percentage change.
+def yoy_change(series: pd.Series, drop_initial: bool = True, periods: int = 12) -> pd.Series:
+    """Year-over-year percentage change.
 
-    Returns the rolling 12-month % change as a decimal (0.025 = 2.5%).
-    With drop_initial=True, the first 12 NaN values are stripped so plots
-    don't start with a flat empty stretch.
+    `periods` is the number of observations in a year: 12 for monthly data
+    (default), 4 for quarterly. Returns a decimal (0.025 = 2.5%).
+    With drop_initial=True, the first `periods` NaN values are stripped so
+    plots don't start with a flat empty stretch.
 
     NOTE: compute YoY on the FULL history series, then filter your display
     window afterwards. Filtering before pct_change throws away 12 months of
     real data at the start of the window.
     """
-    yoy = series.pct_change(periods=12)
+    yoy = series.pct_change(periods=periods)
     if drop_initial:
-        yoy = yoy.iloc[12:]
+        yoy = yoy.iloc[periods:]
     return yoy
 
 
