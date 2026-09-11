@@ -300,124 +300,203 @@ def cpi_dashboard(start_date: str = CPI_DEFAULT_START) -> go.Figure:
     return fig
 
 
-# ---- Contributions to 6m-annualized headline CPI (BLS weights) ---------------
+# ---- Contribution charts (BLS weights, N-month annualized) -------------------
+#
+# Two charts share one engine:
+#   * Headline CPI = Core + Food + Energy
+#   * Core CPI     = Used & New Cars + Other Core Goods + Rent & OER + Other Core Services
+#
+# Method (mirrors the research notebook):
+#   1. SA index levels from BLS -> compound N-month annualized rate, percent.
+#   2. NSA relative-importance weights from BLS (percent of the all-items basket).
+#   3. contribution_c = rate_c x weight_c(start of window) / base_weight(start of window),
+#      where base_weight is 100 for the headline chart and the Core weight for the
+#      core chart, using the BLS convention that the weight published with month t
+#      describes month t-1 (see transforms.weighted_contributions).
+#   4. Displayed groups are signed sums of leaf contributions, e.g.
+#      Other Core Goods = Core Goods - New Vehicles - Used Cars.
 
-# Seasonally adjusted CPI-U indexes (levels) — BLS series ids.
-CPI_SA_BLS = {
-    "Headline": "CUSR0000SA0",
-    "Core":     "CUSR0000SA0L1E",   # All items less food & energy
-    "Food":     "CUSR0000SAF1",
-    "Energy":   "CUSR0000SA0E",
-}
-
-# NSA CPI-U series — these are the ones that carry the BLS
-# "Relative Importance" aspect (basket weights, percent).
-CPI_NSA_BLS = {
-    "Headline": "CUUR0000SA0",
-    "Core":     "CUUR0000SA0L1E",
-    "Food":     "CUUR0000SAF1",
-    "Energy":   "CUUR0000SA0E",
-}
-
-CONTRIB_COMPONENTS = ["Core", "Food", "Energy"]
 CONTRIB_PERIODS = 6                 # 6-month window, annualized
 CONTRIB_FETCH_START_YEAR = 2017     # a year of run-in before the 2018 chart start
 
-CONTRIB_COLORS = {
-    "Core":     "#1f3b63",   # navy
-    "Food":     "#9ecae1",   # light blue
-    "Energy":   "#a6a6a6",   # grey
-    "Headline": "#d62728",   # red
+# BLS CPI-U item codes. SA levels = "CUSR0000" + code, NSA weights = "CUUR0000" + code.
+BLS_ITEM_CODES = {
+    "Headline":       "SA0",
+    "Core":           "SA0L1E",    # All items less food & energy
+    "Food":           "SAF1",
+    "Energy":         "SA0E",
+    "Core Goods":     "SACL1E",    # Commodities less food & energy commodities
+    "Core Services":  "SASLE",     # Services less energy services
+    "New Vehicles":   "SETA01",
+    "Used Cars":      "SETA02",    # Used cars and trucks
+    "Rent":           "SEHA",      # Rent of primary residence
+    "OER":            "SEHC",      # Owners' equivalent rent
 }
 
 
-def cpi_contribution_frame(periods: int = CONTRIB_PERIODS) -> pd.DataFrame:
-    """Contributions of Core / Food / Energy to the N-month annualized headline CPI.
+def _bls_ids(names: list[str], prefix: str) -> dict[str, str]:
+    return {n: prefix + BLS_ITEM_CODES[n] for n in names}
 
-    Steps (mirrors the research notebook):
-      1. SA index levels from BLS  -> compound N-month annualized rate, percent.
-      2. NSA relative-importance weights from BLS (percent of basket).
-      3. contribution_c = rate_c x weight_c(start of window) / 100,
-         using the BLS convention that the weight published with month t
-         describes month t-1  (see transforms.weighted_contributions).
-      4. 'Headline' column = the headline N-month annualized rate itself.
 
-    Returns a DataFrame with columns Core, Food, Energy, Headline (percent).
-    """
-    cpi = bls_client.get_indexes(CPI_SA_BLS, start_year=CONTRIB_FETCH_START_YEAR)
-    weights = bls_client.get_relative_importance(CPI_NSA_BLS, start_year=CONTRIB_FETCH_START_YEAR)
+# Chart specs. `groups` is an ordered list of (display name, {leaf: sign}).
+HEADLINE_CONTRIB = {
+    "line": "Headline",
+    "base": None,                       # weights already sum to 100 across all items
+    "leaves": ["Headline", "Core", "Food", "Energy"],
+    "groups": [
+        ("Core",   {"Core": 1}),
+        ("Food",   {"Food": 1}),
+        ("Energy", {"Energy": 1}),
+    ],
+    "colors": {"Core": "#1f3b63", "Food": "#9ecae1", "Energy": "#a6a6a6"},
+    "line_color": "#d62728",
+    "line_label": "Headline CPI",
+    "title": "Headline CPI — {p}m Annualized, Contributions by Component",
+}
+
+CORE_CONTRIB = {
+    "line": "Core",
+    "base": "Core",                     # rescale weights so Core = 100
+    "leaves": ["Core", "Core Goods", "Core Services", "New Vehicles", "Used Cars", "Rent", "OER"],
+    "groups": [
+        ("Used and New Cars",   {"New Vehicles": 1, "Used Cars": 1}),
+        ("Other Core Goods",    {"Core Goods": 1, "New Vehicles": -1, "Used Cars": -1}),
+        ("Rent + OER",          {"Rent": 1, "OER": 1}),
+        ("Other Core Services", {"Core Services": 1, "Rent": -1, "OER": -1}),
+    ],
+    "colors": {
+        "Used and New Cars":   "#7fbf3f",   # green
+        "Other Core Goods":    "#5b84b1",   # steel blue
+        "Rent + OER":          "#a8cbe8",   # light blue
+        "Other Core Services": "#1f3b63",   # navy
+    },
+    "line_color": "#d62728",
+    "line_label": "Core CPI",
+    "title": "Core CPI — {p}m Annualized, Contributions by Component",
+}
+
+
+def _contribution_frame(spec: dict, periods: int = CONTRIB_PERIODS) -> pd.DataFrame:
+    """Grouped contributions (percentage points) + the aggregate rate column named spec['line']."""
+    leaves = spec["leaves"]
+    cpi = bls_client.get_indexes(_bls_ids(leaves, "CUSR0000"), start_year=CONTRIB_FETCH_START_YEAR)
+    weights = bls_client.get_relative_importance(_bls_ids(leaves, "CUUR0000"), start_year=CONTRIB_FETCH_START_YEAR)
+
+    # Calendar-align before shifting. BLS skipped the October 2025 CPI release; if
+    # that month is simply absent from the index, a row-based shift(6) would span
+    # seven months for the next six observations and annualize them as six.
+    # Reindexing to a full monthly range makes the missing month NaN instead, so
+    # only windows that actually touch the gap drop out.
+    cpi = cpi.reindex(pd.date_range(cpi.index.min(), cpi.index.max(), freq="MS"))
 
     rates = transforms.compound_annualized_change(cpi, periods=periods)
-    contrib = transforms.weighted_contributions(rates, weights, CONTRIB_COMPONENTS, periods=periods)
-    contrib["Headline"] = rates["Headline"]
-    return contrib.dropna()
+    leaf_contrib = transforms.weighted_contributions(
+        rates, weights, leaves, periods=periods, base=spec["base"],
+    )
+
+    out = pd.DataFrame(index=rates.index)
+    for name, parts in spec["groups"]:
+        out[name] = sum(sign * leaf_contrib[leaf] for leaf, sign in parts.items())
+    out[spec["line"]] = rates[spec["line"]]
+    return out.dropna()
 
 
-def cpi_contribution(start_date: str = CPI_DEFAULT_START, periods: int = CONTRIB_PERIODS) -> go.Figure:
-    """Stacked-bar contribution chart with the headline rate overlaid.
+def cpi_contribution_frame(periods: int = CONTRIB_PERIODS) -> pd.DataFrame:
+    """Headline: Core / Food / Energy contributions + 'Headline' rate."""
+    return _contribution_frame(HEADLINE_CONTRIB, periods=periods)
 
-    Bars: Core / Food / Energy contributions (percentage points, stacked with
-    positives above and negatives below zero). Line: headline CPI, N-month
-    annualized. Weights history starts in 2018, so the chart starts there
-    even if an earlier display window is selected.
-    """
-    df = _trim(cpi_contribution_frame(periods=periods), start_date)
 
+def core_cpi_contribution_frame(periods: int = CONTRIB_PERIODS) -> pd.DataFrame:
+    """Core: Used and New Cars / Other Core Goods / Rent + OER / Other Core Services + 'Core' rate."""
+    return _contribution_frame(CORE_CONTRIB, periods=periods)
+
+
+def _contribution_figure(df: pd.DataFrame, spec: dict, periods: int) -> go.Figure:
+    """Stacked bars (positives above zero, negatives below) with the aggregate line overlaid."""
     fig = go.Figure()
-    for comp in CONTRIB_COMPONENTS:
+    for name, _ in spec["groups"]:
         fig.add_trace(go.Bar(
-            x=df.index, y=df[comp], name=comp,
-            marker=dict(color=CONTRIB_COLORS[comp], line=dict(width=0)),
-            hovertemplate="%{x|%b %Y}<br>" + comp + ": %{y:.2f} pp<extra></extra>",
+            x=df.index, y=df[name], name=name,
+            marker=dict(color=spec["colors"][name], line=dict(width=0)),
+            hovertemplate="%{x|%b %Y}<br>" + name + ": %{y:.2f} pp<extra></extra>",
             showlegend=True,
         ))
     fig.add_trace(go.Scatter(
-        x=df.index, y=df["Headline"], name="Headline CPI", mode="lines",
-        line=dict(color=CONTRIB_COLORS["Headline"], width=2),
-        hovertemplate="%{x|%b %Y}<br>Headline: %{y:.2f}%<extra></extra>",
+        x=df.index, y=df[spec["line"]], name=spec["line_label"], mode="lines",
+        line=dict(color=spec["line_color"], width=2),
+        hovertemplate="%{x|%b %Y}<br>" + spec["line_label"] + ": %{y:.2f}%<extra></extra>",
         showlegend=True,
     ))
 
-    plotting.add_last_value_annotation(fig, df["Headline"], fmt="{:.1f}%", scale=1.0)
+    plotting.add_last_value_annotation(fig, df[spec["line"]], fmt="{:.1f}%", scale=1.0)
 
     fig.update_layout(barmode="relative", bargap=0.15)
     fig.update_yaxes(
         title_text=f"% chg, {periods}m annual rate",
         tickformat=".0f", zeroline=True, zerolinewidth=1, zerolinecolor="#444",
     )
-    fig = plotting.apply_layout(
-        fig, title=f"Headline CPI — {periods}m Annualized, Contributions by Component", height=560,
-    )
+    fig = plotting.apply_layout(fig, title=spec["title"].format(p=periods), height=560)
     fig.update_layout(legend=_legend_style(yanchor="bottom", y=1.02))
     return fig
 
 
+def cpi_contribution(start_date: str = CPI_DEFAULT_START, periods: int = CONTRIB_PERIODS) -> go.Figure:
+    """Headline CPI contribution chart. Weights start in 2018, so the chart does too."""
+    df = _trim(cpi_contribution_frame(periods=periods), start_date)
+    return _contribution_figure(df, HEADLINE_CONTRIB, periods)
+
+
+def core_cpi_contribution(start_date: str = CPI_DEFAULT_START, periods: int = CONTRIB_PERIODS) -> go.Figure:
+    """Core CPI contribution chart (cars / other goods / rent+OER / other services)."""
+    df = _trim(core_cpi_contribution_frame(periods=periods), start_date)
+    return _contribution_figure(df, CORE_CONTRIB, periods)
+
+
 # ---- Section assembler -------------------------------------------------------
 
-def _contribution_entry(start_date: str) -> dict:
-    """Chart entry for the BLS contribution chart.
+def _safe_entry(chart_id: str, title: str, commentary: str, builder, start_date: str) -> dict:
+    """Chart entry built inside try/except.
 
-    Built inside try/except so a missing BLS key or a BLS outage degrades to a
-    warning on this one chart instead of taking down the whole Inflation tab.
+    A missing BLS key or a BLS outage degrades to a warning on this one chart
+    instead of taking down the whole Inflation tab.
     """
-    entry = {
-        "id": "cpi_contribution",
-        "title": "Headline CPI — Contributions (6m annualized)",
-        "commentary": (
-            "Bars are the contribution of Core, Food and Energy to the 6-month annualized "
-            "headline rate (percentage points); the red line is headline CPI itself. "
-            "Weights are the BLS relative-importance shares published with the CPI release, "
-            "applied at the start of each 6-month window. Index levels are seasonally adjusted "
-            "(BLS API); weights come from the NSA series, which is where BLS attaches them. "
-            "History starts in 2018 when monthly weights become available."
-        ),
-    }
+    entry = {"id": chart_id, "title": title, "commentary": commentary}
     try:
-        entry["fig"] = cpi_contribution(start_date=start_date)
+        entry["fig"] = builder(start_date=start_date)
     except Exception as e:  # noqa: BLE001
         entry["fig"] = None
         entry["error"] = f"{type(e).__name__}: {e}"
     return entry
+
+
+_CONTRIB_METHOD_NOTE = (
+    "Weights are the BLS relative-importance shares published with the CPI release, applied at "
+    "the start of each 6-month window. Index levels are seasonally adjusted (BLS API); weights "
+    "come from the NSA series, which is where BLS attaches them. History starts in 2018 when "
+    "monthly weights become available."
+)
+
+
+def _contribution_entry(start_date: str) -> dict:
+    return _safe_entry(
+        "cpi_contribution",
+        "Headline CPI — Contributions (6m annualized)",
+        "Bars are the contribution of Core, Food and Energy to the 6-month annualized headline "
+        "rate (percentage points); the red line is headline CPI itself. " + _CONTRIB_METHOD_NOTE,
+        cpi_contribution, start_date,
+    )
+
+
+def _core_contribution_entry(start_date: str) -> dict:
+    return _safe_entry(
+        "core_cpi_contribution",
+        "Core CPI — Contributions (6m annualized)",
+        "Bars split the 6-month annualized core rate into Used and New Cars, Other Core Goods, "
+        "Rent + OER, and Other Core Services (which includes health insurance); the red line is "
+        "core CPI itself. Weights are rescaled so core = 100. 'Other' groups are residuals: "
+        "core goods less vehicles, core services less rent and OER. " + _CONTRIB_METHOD_NOTE,
+        core_cpi_contribution, start_date,
+    )
 
 def build(start_date: str = CPI_DEFAULT_START) -> dict:
     """Build the Inflation section. Same shape as labor.build().
@@ -433,6 +512,7 @@ def build(start_date: str = CPI_DEFAULT_START) -> dict:
             "commentary": f"Display window starts {start_date}. Three views in one: headline + major buckets, services breakdown, and 3m annualized momentum. YoY and 3m-ann are computed on full history and then trimmed, so the chart starts with real data instead of 12 months of NaNs. Click legend entries to hide or show a series.",
         },
         _contribution_entry(start_date),
+        _core_contribution_entry(start_date),
         {
             "id": "cpi_headline_yoy",
             "title": "CPI Headline — Major Buckets (YoY)",
