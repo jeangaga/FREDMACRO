@@ -17,7 +17,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from core import config, plotting, transforms
+from core import bls_client, config, plotting, transforms
 from core.fred_client import get_series
 
 
@@ -300,7 +300,124 @@ def cpi_dashboard(start_date: str = CPI_DEFAULT_START) -> go.Figure:
     return fig
 
 
+# ---- Contributions to 6m-annualized headline CPI (BLS weights) ---------------
+
+# Seasonally adjusted CPI-U indexes (levels) — BLS series ids.
+CPI_SA_BLS = {
+    "Headline": "CUSR0000SA0",
+    "Core":     "CUSR0000SA0L1E",   # All items less food & energy
+    "Food":     "CUSR0000SAF1",
+    "Energy":   "CUSR0000SA0E",
+}
+
+# NSA CPI-U series — these are the ones that carry the BLS
+# "Relative Importance" aspect (basket weights, percent).
+CPI_NSA_BLS = {
+    "Headline": "CUUR0000SA0",
+    "Core":     "CUUR0000SA0L1E",
+    "Food":     "CUUR0000SAF1",
+    "Energy":   "CUUR0000SA0E",
+}
+
+CONTRIB_COMPONENTS = ["Core", "Food", "Energy"]
+CONTRIB_PERIODS = 6                 # 6-month window, annualized
+CONTRIB_FETCH_START_YEAR = 2017     # a year of run-in before the 2018 chart start
+
+CONTRIB_COLORS = {
+    "Core":     "#1f3b63",   # navy
+    "Food":     "#9ecae1",   # light blue
+    "Energy":   "#a6a6a6",   # grey
+    "Headline": "#d62728",   # red
+}
+
+
+def cpi_contribution_frame(periods: int = CONTRIB_PERIODS) -> pd.DataFrame:
+    """Contributions of Core / Food / Energy to the N-month annualized headline CPI.
+
+    Steps (mirrors the research notebook):
+      1. SA index levels from BLS  -> compound N-month annualized rate, percent.
+      2. NSA relative-importance weights from BLS (percent of basket).
+      3. contribution_c = rate_c x weight_c(start of window) / 100,
+         using the BLS convention that the weight published with month t
+         describes month t-1  (see transforms.weighted_contributions).
+      4. 'Headline' column = the headline N-month annualized rate itself.
+
+    Returns a DataFrame with columns Core, Food, Energy, Headline (percent).
+    """
+    cpi = bls_client.get_indexes(CPI_SA_BLS, start_year=CONTRIB_FETCH_START_YEAR)
+    weights = bls_client.get_relative_importance(CPI_NSA_BLS, start_year=CONTRIB_FETCH_START_YEAR)
+
+    rates = transforms.compound_annualized_change(cpi, periods=periods)
+    contrib = transforms.weighted_contributions(rates, weights, CONTRIB_COMPONENTS, periods=periods)
+    contrib["Headline"] = rates["Headline"]
+    return contrib.dropna()
+
+
+def cpi_contribution(start_date: str = CPI_DEFAULT_START, periods: int = CONTRIB_PERIODS) -> go.Figure:
+    """Stacked-bar contribution chart with the headline rate overlaid.
+
+    Bars: Core / Food / Energy contributions (percentage points, stacked with
+    positives above and negatives below zero). Line: headline CPI, N-month
+    annualized. Weights history starts in 2018, so the chart starts there
+    even if an earlier display window is selected.
+    """
+    df = _trim(cpi_contribution_frame(periods=periods), start_date)
+
+    fig = go.Figure()
+    for comp in CONTRIB_COMPONENTS:
+        fig.add_trace(go.Bar(
+            x=df.index, y=df[comp], name=comp,
+            marker=dict(color=CONTRIB_COLORS[comp], line=dict(width=0)),
+            hovertemplate="%{x|%b %Y}<br>" + comp + ": %{y:.2f} pp<extra></extra>",
+            showlegend=True,
+        ))
+    fig.add_trace(go.Scatter(
+        x=df.index, y=df["Headline"], name="Headline CPI", mode="lines",
+        line=dict(color=CONTRIB_COLORS["Headline"], width=2),
+        hovertemplate="%{x|%b %Y}<br>Headline: %{y:.2f}%<extra></extra>",
+        showlegend=True,
+    ))
+
+    plotting.add_last_value_annotation(fig, df["Headline"], fmt="{:.1f}%", scale=1.0)
+
+    fig.update_layout(barmode="relative", bargap=0.15)
+    fig.update_yaxes(
+        title_text=f"% chg, {periods}m annual rate",
+        tickformat=".0f", zeroline=True, zerolinewidth=1, zerolinecolor="#444",
+    )
+    fig = plotting.apply_layout(
+        fig, title=f"Headline CPI — {periods}m Annualized, Contributions by Component", height=560,
+    )
+    fig.update_layout(legend=_legend_style(yanchor="bottom", y=1.02))
+    return fig
+
+
 # ---- Section assembler -------------------------------------------------------
+
+def _contribution_entry(start_date: str) -> dict:
+    """Chart entry for the BLS contribution chart.
+
+    Built inside try/except so a missing BLS key or a BLS outage degrades to a
+    warning on this one chart instead of taking down the whole Inflation tab.
+    """
+    entry = {
+        "id": "cpi_contribution",
+        "title": "Headline CPI — Contributions (6m annualized)",
+        "commentary": (
+            "Bars are the contribution of Core, Food and Energy to the 6-month annualized "
+            "headline rate (percentage points); the red line is headline CPI itself. "
+            "Weights are the BLS relative-importance shares published with the CPI release, "
+            "applied at the start of each 6-month window. Index levels are seasonally adjusted "
+            "(BLS API); weights come from the NSA series, which is where BLS attaches them. "
+            "History starts in 2018 when monthly weights become available."
+        ),
+    }
+    try:
+        entry["fig"] = cpi_contribution(start_date=start_date)
+    except Exception as e:  # noqa: BLE001
+        entry["fig"] = None
+        entry["error"] = f"{type(e).__name__}: {e}"
+    return entry
 
 def build(start_date: str = CPI_DEFAULT_START) -> dict:
     """Build the Inflation section. Same shape as labor.build().
@@ -315,6 +432,7 @@ def build(start_date: str = CPI_DEFAULT_START) -> dict:
             "fig": cpi_dashboard(start_date=start_date),
             "commentary": f"Display window starts {start_date}. Three views in one: headline + major buckets, services breakdown, and 3m annualized momentum. YoY and 3m-ann are computed on full history and then trimmed, so the chart starts with real data instead of 12 months of NaNs. Click legend entries to hide or show a series.",
         },
+        _contribution_entry(start_date),
         {
             "id": "cpi_headline_yoy",
             "title": "CPI Headline — Major Buckets (YoY)",
