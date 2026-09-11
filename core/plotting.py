@@ -147,6 +147,9 @@ def add_last_value_annotation(
         showarrow=True,
         arrowhead=2,
         ax=ax, ay=ay,
+        font=dict(size=13),
+        bgcolor="rgba(255,255,255,0.85)",
+        borderpad=2,
         row=row, col=col,
     )
     return fig
