@@ -14,14 +14,17 @@ fred_macro/
 ├── core/
 │   ├── config.py         # key loading + defaults
 │   ├── fred_client.py    # cached FRED fetcher
+│   ├── bls_client.py     # cached BLS API fetcher (CPI relative-importance weights)
 │   ├── transforms.py     # diff, rolling MA, diffusion index, cyclical split
 │   └── plotting.py       # layout helpers + grid builder
 ├── sections/
 │   └── labor.py          # NFP, claims, JOLTS, diffusion, cyclical view
 ├── notebooks/
-│   └── labor.ipynb       # Colab workbench mirroring sections/labor.py
+│   ├── labor.ipynb       # Colab workbench mirroring sections/labor.py
+│   ├── inflation.ipynb
+│   └── income.ipynb
 ├── app.py                # Streamlit entry
-├── .streamlit/secrets.toml  # FRED_API_KEY (gitignored)
+├── .streamlit/secrets.toml  # FRED_API_KEY + BLS_API_KEY (gitignored)
 └── requirements.txt
 ```
 
@@ -43,15 +46,20 @@ In the first cell of any notebook:
 !pip install -q -e .
 import os
 os.environ["FRED_API_KEY"] = "your_key_here"   # or use Colab user secrets
+os.environ["BLS_API_KEY"] = "your_key_here"    # needed for the CPI contribution chart
 ```
 
 ## API key resolution order
 
-`core.config.get_fred_key()` tries, in order:
+`core.config.get_fred_key()` and `core.config.get_bls_key()` try, in order:
 
-1. `st.secrets["FRED_API_KEY"]` (when running under Streamlit)
-2. `os.environ["FRED_API_KEY"]`
+1. `st.secrets["FRED_API_KEY"]` / `st.secrets["BLS_API_KEY"]` (when running under Streamlit)
+2. `os.environ[...]`
 3. `.env` file in the project root (via `python-dotenv`)
+
+The BLS key (free, https://data.bls.gov/registrationEngine/) is only needed for the
+CPI contribution chart, which uses BLS relative-importance weights that FRED does not carry.
+If it is missing, that one chart shows a warning and the rest of the Inflation tab still renders.
 
 ## Adding a new section
 
