@@ -80,6 +80,67 @@ def _ann_frame(specs: list[tuple[str, str]], periods: int = 3) -> pd.DataFrame:
 def _trim(df: pd.DataFrame, start_date: str) -> pd.DataFrame:
     return df.loc[df.index >= pd.to_datetime(start_date)].copy()
 
+# ---- Presentation constants (display only — no effect on data) ---------------
+
+# Legend labels. Keys are the DataFrame column names produced by the series
+# specs above; values are what the user sees in the Plotly legend.
+DISPLAY_NAMES = {
+    "CPI": "CPI",
+    "Core CPI": "Core CPI",
+    "Services CPI": "Services CPI",
+    "Goods CPI": "Goods CPI",
+    "Foods CPI": "Food CPI",
+    "Shelter CPI": "Shelter",
+    "Medical Svc CPI": "Medical Care",
+    "Transport Svc CPI": "Transportation Services",
+    "Edu Comm Svc CPI": "Education & Communication",
+    "Recreation Svc CPI": "Recreation",
+    "Other Svc CPI": "Other Services",
+    "CPI 3m ann": "Headline CPI — 3m annualized",
+    "Core CPI 3m ann": "Core CPI — 3m annualized",
+}
+
+PANEL_TITLES = (
+    "Headline & Major CPI Components — YoY",
+    "Core Services Breakdown — YoY",
+    "Inflation Momentum — 3m Annualized",
+)
+
+DASHBOARD_TITLE = "U.S. CPI Dashboard — Inflation Level & Momentum"
+DASHBOARD_CAPTION = (
+    "Rates are computed on full available history before applying the selected display window."
+)
+
+_LEGEND_FONT = 13
+_PANEL_TITLE_FONT = 16
+
+
+def _label(col: str) -> str:
+    return DISPLAY_NAMES.get(col, col)
+
+
+def _percent_axis(fig: go.Figure, **kwargs) -> None:
+    """Percent y-axis using ONE formatting mechanism.
+
+    The underlying values are decimals (0.034 == 3.4%), so ``tickformat=".1%"``
+    does both the scaling and the suffix. Adding ``ticksuffix="%"`` on top of it
+    is what produced the ``12.0%%`` labels.
+    """
+    fig.update_yaxes(tickformat=".1%", **kwargs)
+
+
+def _legend_style(**overrides) -> dict:
+    base = dict(
+        orientation="h",
+        font=dict(size=_LEGEND_FONT),
+        bgcolor="rgba(0,0,0,0)",
+        title_text="",
+        xanchor="left",
+        x=0,
+    )
+    base.update(overrides)
+    return base
+
 
 # ---- Individual chart functions ---------------------------------------------
 
@@ -90,13 +151,13 @@ def cpi_headline_yoy(start_date: str = CPI_DEFAULT_START) -> go.Figure:
 
     fig = go.Figure()
     for col in plot_cols:
-        fig.add_trace(go.Scatter(x=df.index, y=df[col], name=col, mode="lines"))
+        fig.add_trace(go.Scatter(x=df.index, y=df[col], name=_label(col), mode="lines", showlegend=True))
 
     plotting.add_last_value_annotation(fig, df["CPI"])
-    fig.update_yaxes(ticksuffix="%", tickformat=".1%")
-    return plotting.apply_layout(
-        fig, title="US CPI — YoY (headline/core + major buckets)", height=520,
-    )
+    _percent_axis(fig)
+    fig = plotting.apply_layout(fig, title=PANEL_TITLES[0], height=520)
+    fig.update_layout(legend=_legend_style(yanchor="bottom", y=1.02))
+    return fig
 
 
 def cpi_services_breakdown(start_date: str = CPI_DEFAULT_START) -> go.Figure:
@@ -106,13 +167,13 @@ def cpi_services_breakdown(start_date: str = CPI_DEFAULT_START) -> go.Figure:
 
     fig = go.Figure()
     for col in plot_cols:
-        fig.add_trace(go.Scatter(x=df.index, y=df[col], name=col, mode="lines"))
+        fig.add_trace(go.Scatter(x=df.index, y=df[col], name=_label(col), mode="lines", showlegend=True))
 
     plotting.add_last_value_annotation(fig, df["Services CPI"])
-    fig.update_yaxes(ticksuffix="%", tickformat=".1%")
-    return plotting.apply_layout(
-        fig, title="US Core Services CPI — YoY breakdown", height=520,
-    )
+    _percent_axis(fig)
+    fig = plotting.apply_layout(fig, title=PANEL_TITLES[1], height=520)
+    fig.update_layout(legend=_legend_style(yanchor="bottom", y=1.02))
+    return fig
 
 
 def cpi_momentum(start_date: str = CPI_DEFAULT_START) -> go.Figure:
@@ -121,23 +182,27 @@ def cpi_momentum(start_date: str = CPI_DEFAULT_START) -> go.Figure:
 
     fig = go.Figure()
     for col in df.columns:
-        fig.add_trace(go.Scatter(x=df.index, y=df[col], name=col, mode="lines"))
+        fig.add_trace(go.Scatter(x=df.index, y=df[col], name=_label(col), mode="lines", showlegend=True))
 
     plotting.add_last_value_annotation(fig, df["CPI 3m ann"])
-    fig.update_yaxes(ticksuffix="%", tickformat=".1%")
-    return plotting.apply_layout(
-        fig, title="US CPI — 3m Annualized (headline vs core)", height=520,
-    )
+    _percent_axis(fig)
+    fig = plotting.apply_layout(fig, title=PANEL_TITLES[2], height=520)
+    fig.update_layout(legend=_legend_style(yanchor="bottom", y=1.02))
+    return fig
 
 
 def cpi_dashboard(start_date: str = CPI_DEFAULT_START) -> go.Figure:
     """Combined 3-panel CPI dashboard, single column.
 
-    Preserves the user's original design:
+    Data logic (unchanged):
       - YoY/3m-ann computed on FULL history, display filtered after
-      - No Plotly legend (would shrink the plots)
-      - Per-panel pseudo-legend as text annotations in paper coords
       - Last-release arrow on the primary series of each panel
+
+    Presentation:
+      - Each panel gets its own native, clickable Plotly legend (legend /
+        legend2 / legend3, Plotly >= 5.15), anchored directly above its plot.
+      - Each panel gets a readable title above the legend.
+      - Vertical order per panel is TITLE -> LEGEND -> PLOT.
     """
     yoy_all = _yoy_frame(HEADLINE_AND_BUCKETS + SERVICES_BREAKDOWN)
     ann_all = _ann_frame(MOMENTUM_SERIES, periods=3)
@@ -146,62 +211,91 @@ def cpi_dashboard(start_date: str = CPI_DEFAULT_START) -> go.Figure:
     df_svc = _trim(yoy_all, start_date)
     df_3m = _trim(ann_all, start_date)
 
-    fig = make_subplots(
-        rows=3, cols=1,
-        shared_xaxes=False,
-        subplot_titles=(
-            f"US CPI — YoY (headline/core + major buckets) [display since {start_date}]",
-            f"US Core Services CPI — YoY breakdown [display since {start_date}]",
-            f"US CPI — 3m annualized (headline vs core) [display since {start_date}]",
-        ),
-        vertical_spacing=0.12,
-    )
+    # ---- Vertical geometry (paper coordinates, 0..1 inside the margins) -----
+    # Each panel reserves `header` above its plot area for title + legend. The
+    # plot areas themselves are ~25% of the paper height each, the same as
+    # the previous layout, so no plotting area is lost.
+    header = 0.08
+    plot_h = (1.0 - 3 * header) / 3
+    domains = []
+    top = 1.0
+    for _ in range(3):
+        top -= header
+        domains.append((top - plot_h, top))
+        top -= plot_h
+
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=False, vertical_spacing=0.0)
 
     # ---- Panel 1: headline & buckets
     p1_cols = ["CPI", "Core CPI", "Services CPI", "Goods CPI", "Foods CPI"]
     for c in p1_cols:
-        fig.add_trace(go.Scatter(x=df_main.index, y=df_main[c], mode="lines", name=c), row=1, col=1)
+        fig.add_trace(
+            go.Scatter(x=df_main.index, y=df_main[c], mode="lines", name=_label(c),
+                       showlegend=True, legend="legend"),
+            row=1, col=1,
+        )
     plotting.add_last_value_annotation(fig, df_main["CPI"], row=1, col=1)
 
     # ---- Panel 2: services breakdown
     p2_cols = [name for _, name in SERVICES_BREAKDOWN]
     for c in p2_cols:
-        fig.add_trace(go.Scatter(x=df_svc.index, y=df_svc[c], mode="lines", name=c), row=2, col=1)
+        fig.add_trace(
+            go.Scatter(x=df_svc.index, y=df_svc[c], mode="lines", name=_label(c),
+                       showlegend=True, legend="legend2"),
+            row=2, col=1,
+        )
     plotting.add_last_value_annotation(fig, df_svc["Services CPI"], row=2, col=1)
 
     # ---- Panel 3: 3m annualized
     p3_cols = ["CPI 3m ann", "Core CPI 3m ann"]
     for c in p3_cols:
-        fig.add_trace(go.Scatter(x=df_3m.index, y=df_3m[c], mode="lines", name=c), row=3, col=1)
+        fig.add_trace(
+            go.Scatter(x=df_3m.index, y=df_3m[c], mode="lines", name=_label(c),
+                       showlegend=True, legend="legend3"),
+            row=3, col=1,
+        )
     plotting.add_last_value_annotation(fig, df_3m["CPI 3m ann"], row=3, col=1)
 
-    # Y-axis formatting: percent on all rows
-    for r in (1, 2, 3):
-        fig.update_yaxes(ticksuffix="%", tickformat=".1%", row=r, col=1)
+    # ---- Axes: one percent mechanism, explicit domains
+    for r, (lo, hi) in enumerate(domains, start=1):
+        _percent_axis(fig, row=r, col=1)
+        fig.update_yaxes(domain=[lo, hi], row=r, col=1)
 
-    # Pseudo-legends between panels (no Plotly legend → charts don't shrink)
-    plotting.add_paper_annotation(
-        fig,
-        "Panel 1: CPI | Core CPI | Services CPI | Goods CPI | Foods CPI",
-        ypaper=0.64,
-    )
-    plotting.add_paper_annotation(
-        fig,
-        "Panel 2: Services | Shelter | Medical | Transport | Edu/Comm | Recreation | Other",
-        ypaper=0.33,
-    )
-    plotting.add_paper_annotation(
-        fig,
-        "Panel 3: CPI 3m ann | Core CPI 3m ann",
-        ypaper=0.05,
+    # ---- Per-panel titles (above legend) and legends (above plot)
+    legends = {}
+    for i, ((lo, hi), name) in enumerate(zip(domains, PANEL_TITLES)):
+        fig.add_annotation(
+            x=0, y=hi + 0.052, xref="paper", yref="paper",
+            xanchor="left", yanchor="bottom",
+            text=f"<b>{name}</b>", showarrow=False,
+            font=dict(size=_PANEL_TITLE_FONT),
+        )
+        key = "legend" if i == 0 else f"legend{i + 1}"
+        legends[key] = _legend_style(yanchor="bottom", y=hi + 0.006)
+
+    # ---- Main title + caption, both in the top margin, left-aligned with plots
+    height, margin_t, margin_b = 1750, 100, 60
+    plot_px = height - margin_t - margin_b
+    fig.add_annotation(
+        x=0, y=1.0 + 26 / plot_px, xref="paper", yref="paper",
+        xanchor="left", yanchor="bottom",
+        text=DASHBOARD_CAPTION, showarrow=False,
+        font=dict(size=12, color="#666"),
     )
 
     fig.update_layout(
-        title="U.S. CPI Dashboard — YoY + 3m Annualized (computed on full history, then filtered)",
+        title=dict(
+            text=DASHBOARD_TITLE,
+            x=0, xanchor="left", xref="paper",
+            # title.y must be in [0, 1]: express the same 52 px offset in container coords
+            y=(height - margin_t + 52) / height, yanchor="bottom", yref="container",
+            font=dict(size=20),
+        ),
         template="plotly_white",
-        height=1650,
-        margin=dict(l=60, r=30, t=70, b=60),
-        showlegend=False,
+        height=height,
+        margin=dict(l=60, r=30, t=margin_t, b=margin_b),
+        showlegend=True,
+        **legends,
     )
     return fig
 
@@ -219,7 +313,7 @@ def build(start_date: str = CPI_DEFAULT_START) -> dict:
             "id": "cpi_dashboard",
             "title": "CPI Dashboard",
             "fig": cpi_dashboard(start_date=start_date),
-            "commentary": "Three views in one: headline + major buckets, services breakdown, and 3m annualized momentum. YoY and 3m-ann are computed on full history and then trimmed, so the chart starts with real data instead of 12 months of NaNs.",
+            "commentary": f"Display window starts {start_date}. Three views in one: headline + major buckets, services breakdown, and 3m annualized momentum. YoY and 3m-ann are computed on full history and then trimmed, so the chart starts with real data instead of 12 months of NaNs. Click legend entries to hide or show a series.",
         },
         {
             "id": "cpi_headline_yoy",

@@ -103,7 +103,7 @@ def claims(start_date: str = config.DEFAULT_START_DATE) -> go.Figure:
     ccsa = get_series("CCSA")
 
     icsa_df = icsa.to_frame("Claims")
-    icsa_df["3m MA"] = icsa_df["Claims"].rolling(12).mean()  # 12-week MA on weekly data
+    icsa_df["12w MA"] = icsa_df["Claims"].rolling(12).mean()  # 12-week MA on weekly data
     icsa_df = icsa_df.loc[icsa_df.index >= pd.to_datetime(start_date)]
 
     ccsa_df = ccsa.to_frame("Continued Claims")
@@ -111,7 +111,7 @@ def claims(start_date: str = config.DEFAULT_START_DATE) -> go.Figure:
 
     fig = make_subplots(rows=1, cols=2, subplot_titles=("Initial Claims", "Continued Claims"))
     fig.add_trace(go.Scatter(x=icsa_df.index, y=icsa_df["Claims"], name="Initial Claims", mode="lines"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=icsa_df.index, y=icsa_df["3m MA"], name="12w MA", mode="lines"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=icsa_df.index, y=icsa_df["12w MA"], name="12w MA", mode="lines"), row=1, col=1)
     fig.add_trace(go.Scatter(x=ccsa_df.index, y=ccsa_df["Continued Claims"], name="Continued Claims", mode="lines"), row=1, col=2)
 
     return plotting.apply_layout(fig, title="Unemployment Claims")
@@ -329,7 +329,7 @@ def build(
         {
             "id": "jolts",
             "title": "JOLTS",
-            "fig": jolts(),
+            "fig": jolts(start_date=start_date),
             "commentary": "Quits rate is the cleanest signal of labor-market tightness — workers quit when they're confident they can find a better job. Layoffs y-axis capped at 2.5% so COVID doesn't flatten the rest.",
         },
         {
