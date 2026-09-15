@@ -1,6 +1,7 @@
 """Configuration: API key loading and project-wide defaults.
 
-Order of resolution for API keys (FRED_API_KEY, BLS_API_KEY):
+Order of resolution for API keys (FRED_API_KEY, BLS_API_KEY, BEA_API_KEY):
+  0. config.set_api_key(<name>, value)   (explicit — notebooks / scripts)
   1. st.secrets[<name>]  (Streamlit runtime)
   2. os.environ[<name>]
   3. .env file in the project root
@@ -13,7 +14,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 # ---- Project-wide defaults ----------------------------------------------------
 
@@ -51,6 +52,39 @@ DEFAULT_HEIGHT = 500                           # plot height in px
 
 # ---- Key loading --------------------------------------------------------------
 
+# Explicit overrides (set_api_key). Checked before every other source so a
+# notebook never has to touch Streamlit secrets, the environment or .env.
+_OVERRIDES: dict[str, str] = {}
+
+# Callbacks notified when a key changes, so clients holding a singleton built
+# with the old key can drop it (see core/fred_client).
+_KEY_LISTENERS: list[Callable[[str], None]] = []
+
+
+def set_api_key(name: str, value: Optional[str]) -> None:
+    """Explicitly set (or clear, with None) an API key for this process.
+
+    Takes precedence over Streamlit secrets, the environment and .env.
+    Any client singleton built with the previous key is invalidated.
+    """
+    if value:
+        _OVERRIDES[name] = value
+    else:
+        _OVERRIDES.pop(name, None)
+    for cb in list(_KEY_LISTENERS):
+        cb(name)
+
+
+def register_key_listener(callback: Callable[[str], None]) -> None:
+    """Register a callable invoked with the key name whenever set_api_key runs."""
+    if callback not in _KEY_LISTENERS:
+        _KEY_LISTENERS.append(callback)
+
+
+def _try_override(name: str) -> Optional[str]:
+    return _OVERRIDES.get(name)
+
+
 def _try_streamlit_secrets(name: str) -> Optional[str]:
     """Read `name` from st.secrets if Streamlit is importable and configured.
 
@@ -79,7 +113,7 @@ def _try_dotenv(name: str) -> Optional[str]:
 
 
 def _get_key(name: str, signup_url: str) -> str:
-    for source in (_try_streamlit_secrets, _try_env, _try_dotenv):
+    for source in (_try_override, _try_streamlit_secrets, _try_env, _try_dotenv):
         key = source(name)
         if key:
             return key
@@ -109,3 +143,12 @@ def get_bls_key() -> str:
         RuntimeError: if no key is found in any source.
     """
     return _get_key("BLS_API_KEY", "https://data.bls.gov/registrationEngine/")
+
+
+def get_bea_key() -> str:
+    """Return the BEA API UserID key (same resolution order).
+
+    Raises:
+        RuntimeError: if no key is found in any source.
+    """
+    return _get_key("BEA_API_KEY", "https://apps.bea.gov/API/signup/")

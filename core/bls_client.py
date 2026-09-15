@@ -143,5 +143,5 @@ def get_relative_importance(
 
 
 def clear_cache() -> None:
-    """Wipe the on-disk BLS cache."""
-    _memory.clear(warn=False)
+    """Wipe this client's on-disk cache entries (BLS only)."""
+    _fetch_raw.clear(warn=False)

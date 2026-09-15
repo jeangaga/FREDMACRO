@@ -12,12 +12,21 @@ Public API:
         Cached fetch that returns None instead of raising. Use when a missing
         series should be silently skipped (e.g. payroll diffusion index that
         unions many sector mnemonics).
+
+    get_frame({"CPIENGSL": "Energy CPI", ...}, freq=None) -> pd.DataFrame
+        Notebook-friendly wrapper around get_series: one column per series,
+        human-readable column names, DatetimeIndex named "Date". Display
+        names never touch the disk cache (which is keyed by series id only).
+
+Keys: resolved by core.config (config.set_api_key(...) wins). Changing the
+FRED key through set_api_key drops the cached Fred client so the next call
+builds a new one.
 """
 
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Optional
+from typing import Optional, Union
 
 import pandas as pd
 from fredapi import Fred
@@ -34,6 +43,15 @@ def _fred() -> Fred:
     """Singleton FRED client, lazily constructed so importing this module
     doesn't fail if the key isn't set yet (e.g. during test collection)."""
     return Fred(api_key=config.get_fred_key())
+
+
+def _on_key_change(name: str) -> None:
+    """Drop the cached Fred client when FRED_API_KEY is (re)configured."""
+    if name == "FRED_API_KEY":
+        _fred.cache_clear()
+
+
+config.register_key_listener(_on_key_change)
 
 
 @_memory.cache
@@ -77,6 +95,38 @@ def get_series_safe(series_id: str, freq: Optional[str] = None) -> Optional[pd.S
         return None
 
 
+def get_frame(
+    series: Union[str, dict[str, str], list[str]],
+    freq: Optional[str] = None,
+) -> pd.DataFrame:
+    """Fetch one or more FRED series into a DataFrame with readable column names.
+
+    Args:
+        series: a FRED id ("CPIENGSL"), a list of ids, or a {id: display name}
+                mapping. Ids without a display name are used as-is.
+        freq:   optional pandas frequency passed to get_series (e.g. "MS").
+
+    Returns:
+        DataFrame indexed by a DatetimeIndex named "Date", one float column per
+        series, outer-joined on dates and sorted. Only get_series is called, so
+        the disk cache is shared with the dashboard and display names never
+        create extra cache entries.
+    """
+    if isinstance(series, str):
+        mapping = {series: series}
+    elif isinstance(series, dict):
+        mapping = dict(series)
+    else:
+        mapping = {sid: sid for sid in series}
+    if not mapping:
+        raise ValueError("no series requested")
+
+    cols = {name or sid: get_series(sid, freq=freq) for sid, name in mapping.items()}
+    df = pd.concat(cols, axis=1).sort_index()
+    df.index = pd.DatetimeIndex(df.index, name="Date")
+    return df
+
+
 def clear_cache() -> None:
-    """Wipe the on-disk cache. Call when you want fresh data."""
-    _memory.clear(warn=False)
+    """Wipe this client's on-disk cache entries (FRED only; BLS/BEA have their own)."""
+    _fetch_series_raw.clear(warn=False)

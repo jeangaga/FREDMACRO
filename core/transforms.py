@@ -16,6 +16,23 @@ def monthly_change(series: pd.Series) -> pd.Series:
     return series.diff()
 
 
+def mom_pct(index: pd.Series) -> pd.Series:
+    """Month-on-month % change of a monthly level/index, in PERCENT, calendar-aligned.
+
+    (index_t / index_{t-1} - 1) * 100
+
+    The series is reindexed to a complete month-start calendar first, so a
+    skipped release (e.g. the October 2025 CPI) yields NaN for that month and
+    the next instead of a two-month change masquerading as one month.
+    Used by the CPI/PCE monthly breakdown tables and the real PCE table.
+    """
+    s = index.dropna().astype(float)
+    if s.empty:
+        return s
+    s = s.reindex(pd.date_range(s.index.min(), s.index.max(), freq="MS"))
+    return (s / s.shift(1) - 1.0) * 100.0
+
+
 def rolling_mean(series: pd.Series, window: int) -> pd.Series:
     return series.rolling(window=window).mean()
 
@@ -43,11 +60,23 @@ def annualized_change(
     periods: int = 3,
     drop_initial: bool = True,
 ) -> pd.Series:
-    """N-period % change, annualized.
+    """N-period % change, LINEARLY annualized, returned as a DECIMAL.
+
+        (x_t / x_{t-N} - 1) * (12 / N)
 
     For monthly data:
       - periods=3 → 3-month change × 4   (the classic "3m annualized")
       - periods=6 → 6-month change × 2
+
+    Which annualization does each dashboard chart use?
+      LINEAR (this function, decimal, multiply by 100 to display):
+        - Inflation tab: "CPI 3m ann" momentum panel / dashboard panel 3
+        - Wages & Income: AHE momentum (3m, 6m), Household income (3m, 6m)
+      COMPOUND (compound_annualized_change, percent):
+        - Inflation tab: 6m-annualized headline / core contribution charts
+        - Wages & Income: Real consumer spending 6m annualized
+    They are deliberately different and must not be consolidated; the
+    numbers on the dashboard depend on which one is used.
 
     Like yoy_change(), compute on full history and filter display after.
     """
@@ -158,14 +187,15 @@ def compound_annualized_change(
     df: pd.DataFrame | pd.Series,
     periods: int = 6,
 ) -> pd.DataFrame | pd.Series:
-    """N-period change of an index, compounded to an annual rate, in PERCENT.
+    """N-period change of an index, COMPOUNDED to an annual rate, in PERCENT.
 
     ((I_t / I_{t-N}) ** (12 / N) - 1) * 100
 
     For periods=6 this is the classic "6m annualized" rate (squared ratio).
     Unlike annualized_change() (linear, decimal), this is compounded and
-    returned in percentage points, because it feeds a contribution chart
-    whose weights are also in percent.
+    returned in percentage points. Used by the CPI contribution charts
+    (headline and core, 6m) and the real consumer spending 6m-annualized
+    line. See annualized_change() for the full chart-by-chart list.
     """
     if periods <= 0:
         raise ValueError("periods must be positive")
