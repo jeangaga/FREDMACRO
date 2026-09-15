@@ -15,6 +15,8 @@ fred_macro/
 │   ├── config.py         # key loading + defaults
 │   ├── fred_client.py    # cached FRED fetcher
 │   ├── bls_client.py     # cached BLS API fetcher (CPI relative-importance weights)
+│   ├── bea_client.py     # cached BEA API fetcher (monthly PCE detail, tables 2.4.4U/2.4.5U)
+│   ├── inflation_tables.py # CPI/PCE monthly breakdown tables (calc + Styler formatting)
 │   ├── transforms.py     # diff, rolling MA, diffusion index, cyclical split
 │   └── plotting.py       # layout helpers + grid builder
 ├── sections/
@@ -51,7 +53,7 @@ os.environ["BLS_API_KEY"] = "your_key_here"    # needed for the CPI contribution
 
 ## API key resolution order
 
-`core.config.get_fred_key()` and `core.config.get_bls_key()` try, in order:
+`core.config.get_fred_key()`, `get_bls_key()` and `get_bea_key()` try, in order:
 
 1. `st.secrets["FRED_API_KEY"]` / `st.secrets["BLS_API_KEY"]` (when running under Streamlit)
 2. `os.environ[...]`
@@ -60,6 +62,17 @@ os.environ["BLS_API_KEY"] = "your_key_here"    # needed for the CPI contribution
 The BLS key (free, https://data.bls.gov/registrationEngine/) is only needed for the
 CPI contribution chart, which uses BLS relative-importance weights that FRED does not carry.
 If it is missing, that one chart shows a warning and the rest of the Inflation tab still renders.
+The BEA key (free, https://apps.bea.gov/API/signup/) is only needed for the PCE monthly breakdown table.
+
+## Notebook code export ("</> Code")
+
+Every chart and table has a `</> Code` popover with a short notebook snippet
+that reproduces its data with the shared `core/` and `sections/` functions,
+plus a "Download all notebook snippets" button in the sidebar. Both come from
+one registry, `core/chart_code_registry.py`. To add a chart to the export,
+add one `_add("<section>_<entry id>", ...)` entry there — `app.py` looks it
+up by the chart's `id` in `sections/<x>.build()`; a missing entry only logs a
+warning. `tests/test_chart_code.py` fails if a rendered chart has no entry.
 
 ## Adding a new section
 
