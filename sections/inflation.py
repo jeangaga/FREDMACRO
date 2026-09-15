@@ -17,7 +17,9 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from core import bls_client, config, plotting, transforms
+import datetime as dt
+
+from core import bea_client, bls_client, config, inflation_tables, plotting, transforms
 from core.fred_client import get_series
 
 
@@ -452,6 +454,194 @@ def core_cpi_contribution(start_date: str = CPI_DEFAULT_START, periods: int = CO
     return _contribution_figure(df, CORE_CONTRIB, periods)
 
 
+# ---- INFLATION DETAIL: monthly breakdown tables (CPI + PCE) ------------------
+#
+# Row registries. Each dict describes one table row:
+#   label / level (0 aggregate, 1 sub-aggregate, 2 component) / bold
+#   PCE : bea = BEA SeriesCode stem in NIPA table 2.4.4U (price index, monthly,
+#         2017=100); the matching current-dollar line in 2.4.5U has the same
+#         stem with "RC" instead of "RG" (IA/LA prefixes for the two derived
+#         aggregates). Weight = current-dollar share of total PCE.
+#         fred = (price index id, nominal id) for the one aggregate BEA
+#         publishes only through FRED's derived series (Super-Core).
+#   CPI : code  = BLS CPI-U item code (SA levels from CUSR0000+code, weights
+#         from the Relative Importance aspect of CUUR0000+code), or
+#         residual = (parent code, [child codes]) computed by
+#         core.inflation_tables.residual_mm.
+
+PCE_TABLE_ROWS = [
+    dict(label="Headline PCE",                              bea="DPCERG",   level=0, bold=True),
+    dict(label="Core PCE (ex food & energy)",               bea="DPCCRG",   level=0, bold=True),
+    dict(label="Core Goods (ex food & energy)",             bea="IA000062", level=1, bold=True),
+    dict(label="Motor vehicles & parts",                    bea="DMOTRG",   level=2),
+    dict(label="Home furnishings & durable equipment",      bea="DFDHRG",   level=2),
+    dict(label="Recreational goods & vehicles",             bea="DREQRG",   level=2),
+    dict(label="Other durable goods",                       bea="DODGRG",   level=2),
+    dict(label="Apparel (clothing & footwear)",             bea="DCLORG",   level=2),
+    dict(label="Other nondurable goods",                    bea="DONGRG",   level=2),
+    dict(label="Core Services (ex energy services)",        bea="IA000063", level=1, bold=True),
+    dict(label="Housing",                                   bea="DHSGRG",   level=2),
+    dict(label="Health care",                               bea="DHLCRG",   level=2),
+    dict(label="Transportation services",                   bea="DTRSRG",   level=2),
+    dict(label="Recreation services",                       bea="DRCARG",   level=2),
+    dict(label="Food services & accommodations",            bea="DFSARG",   level=2),
+    dict(label="Financial services & insurance",            bea="DIFSRG",   level=2),
+    dict(label="Other services",                            bea="DOTSRG",   level=2),
+    dict(label="Food & beverages (off-premises)",           bea="DFXARG",   level=0),
+    dict(label="Energy goods & services",                   bea="DNRGRG",   level=0),
+    dict(label="Super-Core (services ex energy & housing)", fred=("IA001260M", "LA001260M"), level=0, bold=True),
+]
+
+
+def _bea_nominal_code(price_code: str) -> str:
+    """2.4.4U price code -> 2.4.5U current-dollar code (DxxxRG -> DxxxRC, IAnnn -> LAnnn)."""
+    if price_code.startswith("IA"):
+        return "LA" + price_code[2:]
+    if price_code.endswith("RG"):
+        return price_code[:-2] + "RC"
+    raise ValueError(f"cannot derive nominal code from {price_code!r}")
+
+CPI_TABLE_ROWS = [
+    dict(label="Headline CPI",                          code="SA0",    level=0, bold=True),
+    dict(label="Core CPI (ex food & energy)",           code="SA0L1E", level=0, bold=True),
+    dict(label="Core Goods",                            code="SACL1E", level=1, bold=True),
+    dict(label="New vehicles",                          code="SETA01", level=2),
+    dict(label="Used cars & trucks",                    code="SETA02", level=2),
+    dict(label="Apparel",                               code="SAA",    level=2),
+    dict(label="Medical care commodities",              code="SAM1",   level=2),
+    dict(label="Other core goods (residual)",           residual=("SACL1E", ["SETA01", "SETA02", "SAA", "SAM1"]), level=2),
+    dict(label="Core Services",                         code="SASLE",  level=1, bold=True),
+    dict(label="Shelter",                               code="SAH1",   level=2),
+    dict(label="Medical care services",                 code="SAM2",   level=2),
+    dict(label="Transportation services",               code="SAS4",   level=2),
+    dict(label="Recreation services",                   code="SARS",   level=2),
+    dict(label="Education & communication services",    code="SAES",   level=2),
+    # "Other personal services" (SAGS) has no seasonally adjusted series, so the
+    # remainder of core services is shown as a documented residual instead.
+    dict(label="Other core services (residual)",        residual=("SASLE", ["SAH1", "SAM2", "SAS4", "SARS", "SAES"]), level=2),
+    dict(label="Food",                                  code="SAF1",   level=0, bold=True),
+    dict(label="Energy",                                code="SA0E",   level=0, bold=True),
+    dict(label="Super-Core (core services ex shelter)", residual=("SASLE", ["SAH1"]), level=0, bold=True),
+]
+
+TABLE_MONTHS = 3
+
+PCE_TABLE_CAPTION = (
+    "Seasonally adjusted month-on-month percent change of BEA chain-type price indexes (NIPA table 2.4.4U "
+    "via the BEA API; Super-Core via FRED). Weights correspond to the latest available composition "
+    "measure: PCE weights shown as current-dollar expenditure shares (table 2.4.5U) and are an "
+    "approximation to chain-index contribution weights. Core Services components exclude household "
+    "utilities and nonprofit final consumption, so they do not sum exactly to Core Services."
+)
+CPI_TABLE_CAPTION = (
+    "Seasonally adjusted CPI-U month-on-month percent change (BLS API). Weights are the BLS Relative "
+    "Importance published with the latest CPI release. Residual rows are derived from the parent and the "
+    "listed components using those weights; Super-Core is core services excluding shelter."
+)
+
+
+def _pce_rows() -> list[inflation_tables.TableRow]:
+    """Rows for the PCE table: BEA 2.4.4U price indexes (m/m on full fetched
+    history) and 2.4.5U current-dollar levels (weights = share of total PCE at
+    the latest month). One missing line only blanks its own row."""
+    year = dt.date.today().year
+    bea_specs = [s for s in PCE_TABLE_ROWS if "bea" in s]
+    price_codes = {s["bea"]: s["bea"] for s in bea_specs}
+    nom_codes = {s["bea"]: _bea_nominal_code(s["bea"]) for s in bea_specs}
+    prices = bea_client.get_table_series(bea_client.TABLE_PCE_PRICE, price_codes, start_year=year - 2)
+    nominal = bea_client.get_table_series(bea_client.TABLE_PCE_NOMINAL, nom_codes, start_year=year - 2)
+
+    total = nominal["DPCERG"].dropna()                # total PCE, $mn SAAR (keyed by its price stem)
+    w_date = total.index.max()
+
+    rows = []
+    for spec in PCE_TABLE_ROWS:
+        mm, w, note = None, None, ""
+        try:
+            if "bea" in spec:
+                k = spec["bea"]
+                mm = inflation_tables.mm_pct(prices[k])
+                nom = nominal[k].dropna()
+            else:
+                price_id, nominal_id = spec["fred"]
+                mm = inflation_tables.mm_pct(get_series(price_id))
+                nom = get_series(nominal_id).dropna()     # FRED LA... series are $mn too
+            if w_date in nom.index:
+                w = float(nom.loc[w_date] / total.loc[w_date] * 100.0)
+            else:
+                note = f"no nominal value for {w_date:%b %Y}"
+        except Exception as e:  # noqa: BLE001
+            note = f"{type(e).__name__}: {e}"
+        rows.append(inflation_tables.TableRow(spec["label"], mm, w, spec["level"], spec.get("bold", False), note))
+    return rows
+
+
+def pce_table(n_months: int = TABLE_MONTHS) -> inflation_tables.InflationTable:
+    return inflation_tables.build_inflation_table(_pce_rows(), n_months=n_months)
+
+
+def _cpi_rows() -> list[inflation_tables.TableRow]:
+    """Rows for the CPI table from the BLS API (SA levels + NSA relative importance)."""
+    codes = sorted({s["code"] for s in CPI_TABLE_ROWS if "code" in s})
+    year = dt.date.today().year
+    levels = bls_client.get_indexes({c: "CUSR0000" + c for c in codes}, start_year=year - 2)
+    ri = bls_client.get_relative_importance({c: "CUUR0000" + c for c in codes}, start_year=year - 2)
+    w_row = ri.dropna(subset=["SA0"]).iloc[-1]           # latest month with a headline weight
+
+    mm = {c: inflation_tables.mm_pct(levels[c]) for c in codes if c in levels.columns}
+    weight = {c: float(w_row[c]) for c in codes if c in w_row.index and pd.notna(w_row[c])}
+
+    rows = []
+    for spec in CPI_TABLE_ROWS:
+        note = ""
+        try:
+            if "code" in spec:
+                c = spec["code"]
+                r_mm, r_w = mm.get(c), weight.get(c)
+                if r_mm is None:
+                    note = "no SA series"
+            else:
+                parent, children = spec["residual"]
+                r_mm, r_w = inflation_tables.residual_mm(
+                    mm[parent], weight[parent], [(mm[k], weight[k]) for k in children],
+                )
+        except Exception as e:  # noqa: BLE001
+            r_mm, r_w, note = None, None, f"{type(e).__name__}: {e}"
+        rows.append(inflation_tables.TableRow(spec["label"], r_mm, r_w, spec["level"], spec.get("bold", False), note))
+    return rows
+
+
+def cpi_table(n_months: int = TABLE_MONTHS) -> inflation_tables.InflationTable:
+    return inflation_tables.build_inflation_table(_cpi_rows(), n_months=n_months)
+
+
+def _table_tab(label: str, builder, caption: str) -> dict:
+    """One sub-tab of the detail block: styled HTML + caption, or an error."""
+    tab = {"label": label, "caption": caption}
+    try:
+        tbl = builder()
+        tab["html"] = inflation_tables.table_html(tbl)
+        missing = [f"{tbl.df.loc[i, 'Category']} ({n})" for i, n in enumerate(tbl.notes) if n]
+        if missing:
+            tab["caption"] += " Rows without data: " + "; ".join(missing) + "."
+    except Exception as e:  # noqa: BLE001
+        tab["error"] = f"{type(e).__name__}: {e}"
+    return tab
+
+
+def inflation_detail_entry() -> dict:
+    """Section entry rendered by app.py as sub-tabs (PCE | CPI) with one table each."""
+    return {
+        "id": "inflation_detail",
+        "title": "Inflation Detail",
+        "tabs": [
+            _table_tab("PCE", pce_table, PCE_TABLE_CAPTION),
+            _table_tab("CPI", cpi_table, CPI_TABLE_CAPTION),
+        ],
+        "commentary": None,
+    }
+
+
 # ---- Section assembler -------------------------------------------------------
 
 def _safe_entry(chart_id: str, title: str, commentary: str, builder, start_date: str) -> dict:
@@ -531,6 +721,7 @@ def build(start_date: str = CPI_DEFAULT_START) -> dict:
             "fig": cpi_momentum(start_date=start_date),
             "commentary": "3m annualized = current-quarter pace. When it diverges from YoY, momentum is shifting — useful leading signal for where YoY is headed.",
         },
+        inflation_detail_entry(),
     ]
 
     return {

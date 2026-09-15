@@ -25,7 +25,9 @@ from typing import Callable, Literal
 import pandas as pd
 import plotly.graph_objects as go
 
-from core import config, plotting, transforms
+import datetime as dt
+
+from core import bea_client, config, inflation_tables, plotting, transforms
 from core.fred_client import get_series
 
 
@@ -213,6 +215,111 @@ def labor_income(start_date: str = DEFAULT_INCOME_START_DATE) -> go.Figure:
     return _finish(fig, "Aggregate Labor Income — Growth", y_title="Percent")
 
 
+# ---- Blocks 5-6: consumer spending -------------------------------------------
+#
+# Real PCE spending detail comes from BEA NIPA table 2.4.6U (real PCE by type
+# of product, millions of chained 2017 dollars, SAAR, monthly) through the
+# shared BEA client. FRED carries this detail at quarterly frequency only.
+# `bea` is the 2.4.6U SeriesCode (real = "...RX"; the two derived core
+# aggregates are LB000062 / LB000063). Mapping to the reference table:
+#   Home furnishings   -> Furnishings and durable household equipment (DFDHRX)
+#   Recreational goods -> Recreational goods and vehicles (DREQRX)
+#   Apparel            -> Clothing and footwear (DCLORX)
+#   Housing            -> Housing (DHSGRX; excludes household utilities)
+#   Food services      -> Food services and accommodations (DFSARX)
+#   Core Goods         -> PCE goods excluding food and energy (LB000062)
+#   Core Services      -> PCE services excluding energy (LB000063)
+
+REAL_PCE_ROWS = [
+    dict(label="Headline",             bea="DPCERX",   level=0, bold=True),
+    dict(label="ex Food and Energy",   bea="DPCCRX",   level=0, bold=True),
+    dict(label="Core Goods",           bea="LB000062", level=1, bold=True),
+    dict(label="Motor vehicles",       bea="DMOTRX",   level=2),
+    dict(label="Home furnishings",     bea="DFDHRX",   level=2),
+    dict(label="Recreational goods",   bea="DREQRX",   level=2),
+    dict(label="Other durables",       bea="DODGRX",   level=2),
+    dict(label="Apparel",              bea="DCLORX",   level=2),
+    dict(label="Other nondurables",    bea="DONGRX",   level=2),
+    dict(label="Core Services",        bea="LB000063", level=1, bold=True),
+    dict(label="Housing",              bea="DHSGRX",   level=2),
+    dict(label="Health care",          bea="DHLCRX",   level=2),
+    dict(label="Transportation",       bea="DTRSRX",   level=2),
+    dict(label="Recreation",           bea="DRCARX",   level=2),
+    dict(label="Food services",        bea="DFSARX",   level=2),
+    dict(label="Financial services",   bea="DIFSRX",   level=2),
+    dict(label="Other services",       bea="DOTSRX",   level=2),
+]
+
+REAL_PCE_TABLE_MONTHS = 3
+REAL_PCE_TABLE_CAPTION = (
+    "Month-on-month percent change of real (chained 2017 dollar) personal consumption expenditures, "
+    "seasonally adjusted, BEA NIPA table 2.4.6U via the BEA API. Core Goods = goods excluding food and "
+    "energy; Core Services = services excluding energy services. Shading is symmetric around zero: "
+    "warm = growth, green = decline."
+)
+
+
+def _real_pce_rows() -> list[inflation_tables.TableRow]:
+    year = dt.date.today().year
+    codes = {s["bea"]: s["bea"] for s in REAL_PCE_ROWS}
+    levels = bea_client.get_table_series(bea_client.TABLE_PCE_REAL, codes, start_year=year - 2)
+    rows = []
+    for spec in REAL_PCE_ROWS:
+        mm, note = None, ""
+        try:
+            mm = inflation_tables.mm_pct(levels[spec["bea"]])
+        except Exception as e:  # noqa: BLE001
+            note = f"{type(e).__name__}: {e}"
+        rows.append(inflation_tables.TableRow(spec["label"], mm, None, spec["level"], spec.get("bold", False), note))
+    return rows
+
+
+def real_pce_table(n_months: int = REAL_PCE_TABLE_MONTHS) -> inflation_tables.InflationTable:
+    """Latest `n_months` m/m % changes of real PCE by category (no weight column)."""
+    return inflation_tables.build_inflation_table(_real_pce_rows(), n_months=n_months, include_weight=False)
+
+
+def real_pce_growth_frame() -> pd.DataFrame:
+    """Total real PCE (FRED PCEC96): YoY and 6m annualized, percent, full history.
+
+    6m annualized = ((x_t / x_{t-6}) ** 2 - 1) * 100  (transforms.compound_annualized_change).
+    """
+    s = get_series("PCEC96").dropna()
+    return pd.concat({
+        "Real PCE — YoY": transforms.yoy_change(s, periods=12) * 100.0,
+        "Real PCE — 6m annualized": transforms.compound_annualized_change(s, periods=6),
+    }, axis=1)
+
+
+def real_pce_growth(start_date: str = DEFAULT_INCOME_START_DATE) -> go.Figure:
+    df = _trim(real_pce_growth_frame(), start_date)
+    fig = _lines(df, styles={
+        "Real PCE — YoY": dict(color="#1f3b63", width=2.4),
+        "Real PCE — 6m annualized": dict(color="#a6a6a6", width=1.6),
+    })
+    for col, ay in (("Real PCE — YoY", -25), ("Real PCE — 6m annualized", 25)):
+        plotting.add_last_value_annotation(fig, df[col], fmt="{:.1f}%", scale=1.0, ay=ay)
+    return _finish(fig, "Real Consumer Spending — YoY vs 6-Month Annualized", y_title="Percent")
+
+
+def _safe_table_entry(chart_id: str, title: str, commentary: str, builder: Callable[[], inflation_tables.InflationTable], **extra) -> dict:
+    """Like _safe_entry, but the payload is pre-rendered table HTML (rendered by app.py with st.markdown)."""
+    entry = {"id": chart_id, "title": title, "commentary": commentary, **extra}
+    try:
+        tbl = builder()
+        entry["html"] = inflation_tables.table_html(tbl)
+        missing = [f"{tbl.df.loc[i, 'Category']} ({n})" for i, n in enumerate(tbl.notes) if n]
+        if missing:
+            entry["commentary"] += " Rows without data: " + "; ".join(missing) + "."
+    except RuntimeError as e:
+        if "API_KEY" in str(e) and "BEA" not in str(e):
+            raise
+        entry["html"], entry["error"] = None, f"{type(e).__name__}: {e}"
+    except Exception as e:  # noqa: BLE001
+        entry["html"], entry["error"] = None, f"{type(e).__name__}: {e}"
+    return entry
+
+
 # ---- Section assembler -------------------------------------------------------
 
 def _safe_entry(chart_id: str, title: str, commentary: str, builder: Callable[[], go.Figure]) -> dict:
@@ -266,6 +373,19 @@ def build(
             "(all employees, total private) into one index, 100 at March 2006. Combines employment, working "
             "hours and hourly pay to approximate aggregate private-sector labor-income growth.",
             lambda: labor_income(start_date),
+        ),
+        _safe_table_entry(
+            "real_pce_table", "Real PCE Spending — Monthly Change",
+            REAL_PCE_TABLE_CAPTION,
+            real_pce_table,
+            heading="Consumer Spending",
+        ),
+        _safe_entry(
+            "real_pce_growth", "Real Consumer Spending — YoY vs 6-Month Annualized",
+            "Total real personal consumption expenditures (FRED PCEC96, chained 2017 dollars). YoY = 12-month "
+            "change; 6m annualized = compounded 6-month change. Both are computed on full history, then trimmed "
+            "to the Wages & Income start date.",
+            lambda: real_pce_growth(start_date),
         ),
     ]
     return {"title": "Wages & Income", "charts": charts}
